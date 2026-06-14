@@ -2,30 +2,48 @@ using Npgsql;
 
 namespace BlackstoneAI.Services;
 
-public class KnowledgeSeeder(IConfiguration config)
+public class KnowledgeSeeder(IConfiguration config, EmbeddingService embeddings, QdrantService qdrant, ILogger<KnowledgeSeeder> logger)
 {
     private readonly string _connStr = MemoryService.ParseConnStr(config["DATABASE_URL"]!);
 
     public async Task SeedIfEmptyAsync()
     {
+        await qdrant.EnsureCollectionAsync();
+
+        // Use Qdrant point count as the source of truth
+        var count = await qdrant.CountAsync();
+        if (count > 0)
+        {
+            logger.LogInformation("Knowledge base already seeded ({Count} vectors in Qdrant).", count);
+            return;
+        }
+
+        logger.LogInformation("Seeding knowledge base — embedding {Count} chunks via CLIP...", KnowledgeData.All.Length);
+
+        // Also keep Postgres as the source of record (for inspection / future use)
         await using var conn = new NpgsqlConnection(_connStr);
         await conn.OpenAsync();
 
-        long count;
-        await using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM knowledge_chunks", conn))
-            count = (long)(await cmd.ExecuteScalarAsync())!;
-
-        if (count > 0) return;
-
         foreach (var doc in KnowledgeData.All)
         {
-            await using var cmd = new NpgsqlCommand(
-                "INSERT INTO knowledge_chunks (source, category, content) VALUES ($1, $2, $3)", conn);
-            cmd.Parameters.AddWithValue(doc.Source);
-            cmd.Parameters.AddWithValue(doc.Category);
-            cmd.Parameters.AddWithValue(doc.Content);
-            await cmd.ExecuteNonQueryAsync();
+            // Persist to Postgres
+            string id;
+            await using (var cmd = new NpgsqlCommand(
+                "INSERT INTO knowledge_chunks (source, category, content) VALUES ($1, $2, $3) RETURNING id", conn))
+            {
+                cmd.Parameters.AddWithValue(doc.Source);
+                cmd.Parameters.AddWithValue(doc.Category);
+                cmd.Parameters.AddWithValue(doc.Content);
+                id = (await cmd.ExecuteScalarAsync())!.ToString()!;
+            }
+
+            // Embed + upsert into Qdrant
+            var vector = await embeddings.EmbedAsync(doc.Content);
+            await qdrant.UpsertAsync(id, vector, doc.Source, doc.Category, doc.Content);
+            logger.LogInformation("  Seeded: [{Category}] {Preview}...", doc.Category, doc.Content[..Math.Min(50, doc.Content.Length)]);
         }
+
+        logger.LogInformation("Knowledge base seeding complete.");
     }
 }
 

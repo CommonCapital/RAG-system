@@ -17,7 +17,10 @@ builder.Configuration.AddEnvironmentVariables();
 
 builder.Services.AddControllers();
 builder.Services.AddHttpClient<DeepSeekClient>();
+builder.Services.AddHttpClient<EmbeddingService>();
 builder.Services.AddSingleton<DeepSeekClient>();
+builder.Services.AddSingleton<EmbeddingService>();
+builder.Services.AddSingleton<QdrantService>();
 builder.Services.AddSingleton<MemoryService>();
 builder.Services.AddSingleton<RetrievalService>();
 builder.Services.AddSingleton<KnowledgeSeeder>();
@@ -35,7 +38,7 @@ var app = builder.Build();
 app.UseCors();
 app.MapControllers();
 
-// Init schema + seed knowledge on startup
+// Init schema, ensure Qdrant collection, seed knowledge on first run
 var memory = app.Services.GetRequiredService<MemoryService>();
 var seeder = app.Services.GetRequiredService<KnowledgeSeeder>();
 await memory.InitSchemaAsync();

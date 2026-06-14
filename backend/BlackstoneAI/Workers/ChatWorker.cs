@@ -37,13 +37,7 @@ public class ChatWorker(IConfiguration config, DeepSeekClient ai, MemoryService 
 
     private async Task ConnectAsync(CancellationToken ct)
     {
-        var factory = new ConnectionFactory
-        {
-            HostName = config["RABBITMQ_HOST"] ?? "localhost",
-            Port = int.Parse(config["RABBITMQ_PORT"] ?? "5672"),
-            UserName = config["RABBITMQ_USER"] ?? "guest",
-            Password = config["RABBITMQ_PASS"] ?? "guest",
-        };
+        var factory = ChatQueueService.BuildFactory(config);
 
         _conn = await factory.CreateConnectionAsync(ct);
         _channel = await _conn.CreateChannelAsync(cancellationToken: ct);
