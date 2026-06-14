@@ -14,7 +14,8 @@ Answer using ONLY the provided context. If the context lacks the answer, say so 
 
 export async function streamChat(
   messages: Message[],
-  context: string
+  context: string,
+  summary?: string | null
 ): Promise<ReadableStream<Uint8Array>> {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) throw new Error("DEEPSEEK_API_KEY is not set");
@@ -33,6 +34,7 @@ export async function streamChat(
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "system", content: `Context:\n\n${context}` },
+        ...(summary ? [{ role: "system" as const, content: `Summary of earlier conversation:\n${summary}` }] : []),
         ...messages,
       ],
     }),

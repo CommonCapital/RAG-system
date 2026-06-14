@@ -1,33 +1,67 @@
 import { NextRequest, NextResponse } from "next/server";
 import { retrieve, buildContext } from "@/lib/retrieval";
-import { streamChat, Message } from "@/lib/llm";
+import { streamChat } from "@/lib/llm";
+import { initSchema } from "@/lib/db";
+import { getMemoryContext, saveExchangeAndCompress } from "@/lib/memory";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
-  let messages: Message[];
+  let userId: string | undefined;
+  let message: string | undefined;
+
   try {
-    ({ messages } = await req.json());
+    ({ userId, message } = await req.json());
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  if (!Array.isArray(messages) || !messages.length) {
-    return NextResponse.json({ error: "messages required" }, { status: 400 });
-  }
-
-  const lastUser = [...messages].reverse().find((m) => m.role === "user");
-  if (!lastUser) {
-    return NextResponse.json({ error: "No user message" }, { status: 400 });
+  if (!message?.trim()) {
+    return NextResponse.json({ error: "message required" }, { status: 400 });
   }
 
   try {
-    const chunks = await retrieve(lastUser.content, 6);
-    const context = buildContext(chunks);
-    const stream = await streamChat(messages, context);
+    await initSchema();
 
-    return new NextResponse(stream, {
+    const [chunks, memory] = await Promise.all([
+      retrieve(message, 6),
+      userId ? getMemoryContext(userId) : Promise.resolve({ summary: null, recentMessages: [] }),
+    ]);
+
+    const context = buildContext(chunks);
+
+    // Build the message list: history window + new user message
+    const messages = [
+      ...memory.recentMessages,
+      { role: "user" as const, content: message.trim() },
+    ];
+
+    const stream = await streamChat(messages, context, memory.summary);
+
+    // Collect the full reply so we can persist it after streaming
+    const [clientStream, saveStream] = stream.tee();
+
+    if (userId) {
+      // Drain saveStream in the background to capture the full reply
+      (async () => {
+        const reader = saveStream.getReader();
+        const decoder = new TextDecoder();
+        let full = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          full += decoder.decode(value, { stream: true });
+        }
+        if (full) {
+          await saveExchangeAndCompress(userId!, message!.trim(), full).catch(
+            (err) => console.error("[memory/save]", err)
+          );
+        }
+      })();
+    }
+
+    return new NextResponse(clientStream, {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
         "Transfer-Encoding": "chunked",

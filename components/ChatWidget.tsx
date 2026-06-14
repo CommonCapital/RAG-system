@@ -3,6 +3,15 @@
 import { useState, useRef, useEffect, FormEvent } from "react";
 import { Send, Loader2, X, ArrowUpRight } from "lucide-react";
 
+function getUserId(): string {
+  let id = localStorage.getItem("bx_user_id");
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem("bx_user_id", id);
+  }
+  return id;
+}
+
 interface Message {
   role: "user" | "assistant";
   content: string;
@@ -23,6 +32,8 @@ export default function ChatWidget() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const userIdRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -31,24 +42,37 @@ export default function ChatWidget() {
   }, [messages, streaming]);
 
   useEffect(() => {
-    if (open) setTimeout(() => inputRef.current?.focus(), 100);
-  }, [open]);
+    if (!open) return;
+    setTimeout(() => inputRef.current?.focus(), 100);
+
+    if (historyLoaded) return;
+    const uid = getUserId();
+    userIdRef.current = uid;
+    fetch(`/api/history?userId=${uid}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data.messages) && data.messages.length > 0) {
+          setMessages(data.messages);
+        }
+      })
+      .catch(() => {/* silently ignore — memory unavailable */})
+      .finally(() => setHistoryLoaded(true));
+  }, [open, historyLoaded]);
 
   async function send(text: string) {
     if (!text.trim() || streaming) return;
     const userMsg: Message = { role: "user", content: text.trim() };
-    const updated = [...messages, userMsg];
-    setMessages(updated);
+    setMessages((prev) => [...prev, userMsg, { role: "assistant", content: "" }]);
     setInput("");
     setError(null);
     setStreaming(true);
-    setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
     try {
+      const uid = userIdRef.current ?? getUserId();
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: updated }),
+        body: JSON.stringify({ userId: uid, message: text.trim() }),
       });
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
@@ -69,7 +93,7 @@ export default function ChatWidget() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
-      setMessages((prev) => prev.slice(0, -1));
+      setMessages((prev) => prev.slice(0, -2)); // remove both user + empty assistant
     } finally {
       setStreaming(false);
     }
