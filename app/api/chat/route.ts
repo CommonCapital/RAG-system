@@ -1,11 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { retrieve, buildContext } from "@/lib/retrieval";
-import { streamChat } from "@/lib/llm";
-import { initSchema } from "@/lib/db";
-import { getMemoryContext, saveExchangeAndCompress } from "@/lib/memory";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const DOTNET_URL = process.env.DOTNET_BACKEND_URL ?? "http://localhost:5000";
 
 export async function POST(req: NextRequest) {
   let userId: string | undefined;
@@ -22,50 +20,21 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    await initSchema();
+    const res = await fetch(`${DOTNET_URL}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: userId ?? "anonymous", message: message.trim() }),
+    });
 
-    const [chunks, memory] = await Promise.all([
-      retrieve(message, 6),
-      userId ? getMemoryContext(userId) : Promise.resolve({ summary: null, recentMessages: [] }),
-    ]);
+    const data = await res.json();
 
-    const context = buildContext(chunks);
-
-    // Build the message list: history window + new user message
-    const messages = [
-      ...memory.recentMessages,
-      { role: "user" as const, content: message.trim() },
-    ];
-
-    const stream = await streamChat(messages, context, memory.summary);
-
-    // Collect the full reply so we can persist it after streaming
-    const [clientStream, saveStream] = stream.tee();
-
-    if (userId) {
-      // Drain saveStream in the background to capture the full reply
-      (async () => {
-        const reader = saveStream.getReader();
-        const decoder = new TextDecoder();
-        let full = "";
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          full += decoder.decode(value, { stream: true });
-        }
-        if (full) {
-          await saveExchangeAndCompress(userId!, message!.trim(), full).catch(
-            (err) => console.error("[memory/save]", err)
-          );
-        }
-      })();
+    if (!res.ok) {
+      return NextResponse.json({ error: data.error ?? "AI unavailable" }, { status: res.status });
     }
 
-    return new NextResponse(clientStream, {
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Transfer-Encoding": "chunked",
-      },
+    // Return as plain text to stay compatible with the streaming reader in ChatWidget
+    return new NextResponse(data.content ?? "", {
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
     });
   } catch (err) {
     console.error("[chat]", err);

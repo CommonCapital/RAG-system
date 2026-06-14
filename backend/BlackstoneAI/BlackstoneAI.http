@@ -1,0 +1,6 @@
+@BlackstoneAI_HostAddress = http://localhost:5187
+
+GET {{BlackstoneAI_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
