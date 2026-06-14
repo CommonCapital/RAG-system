@@ -1,235 +1,228 @@
-# Blackstone Clone — RAG-Integrated Website
+# Blackstone Clone — RAG AI Assistant
 
-A pixel-faithful clone of the [Blackstone](https://blackstone.com) website, extended with a fully functional **Retrieval-Augmented Generation (RAG) chat assistant** that lets visitors ask natural-language questions about the firm and receive grounded, accurate answers in real time.
+A pixel-faithful clone of the [Blackstone](https://blackstone.com) website with a fully functional AI chat assistant powered by a **dedicated .NET backend**, **RabbitMQ message queue**, **PostgreSQL**, and the **DeepSeek LLM** — all running locally via Docker.
+
+> Next.js is the frontend only. All AI logic lives in the .NET server.
 
 ---
 
-## ✨ Features
+## Architecture
 
-| Area | Details |
+```
+Browser (Next.js UI)
+        │
+        │  HTTP REST
+        ▼
+┌─────────────────────────────────────────┐
+│         .NET ASP.NET Core API           │
+│                                         │
+│  ChatController  HistoryController      │
+│        │                                │
+│        │ publishes request + corr. ID   │
+│        ▼                                │
+│   RabbitMQ (blackstone.chat.requests)   │  ← reliability layer
+│        │                                │
+│        │ consumed by                    │
+│        ▼                                │
+│     ChatWorker (BackgroundService)      │
+│        │                                │
+│        ├── RetrievalService             │  keyword search → Postgres
+│        ├── MemoryService                │  sliding-window memory → Postgres
+│        └── DeepSeekClient              │  LLM call → DeepSeek API
+│        │                                │
+│        │ publishes reply                │
+│        ▼                                │
+│   RabbitMQ (blackstone.chat.replies)    │
+│        │                                │
+│        │ controller awaits by corr. ID  │
+│        ▼                                │
+│     HTTP response → Browser             │
+└─────────────────────────────────────────┘
+        │
+        ▼
+   PostgreSQL (Docker)
+   ├── knowledge_chunks     ← 38 Blackstone knowledge documents
+   ├── user_conversations   ← per-user message history
+   └── user_summaries       ← compressed conversation summaries
+```
+
+### Why RabbitMQ?
+
+RabbitMQ sits **inside the .NET server** between the HTTP controller and the AI worker. This is the RPC pattern:
+
+1. `ChatController` receives an HTTP request, generates a correlation ID, and **publishes** the message to the `blackstone.chat.requests` queue. It then waits on a `TaskCompletionSource` keyed by that ID.
+2. `ChatWorker` (a `BackgroundService`) **consumes** from the queue, runs the full AI pipeline (retrieval → memory → LLM), and **publishes** the result to `blackstone.chat.replies`.
+3. A reply consumer on the controller side resolves the `TaskCompletionSource`, and the HTTP response is returned.
+
+**Benefits:** requests queue up instead of failing under load; the worker reconnects automatically if it crashes; processing is decoupled from the HTTP layer.
+
+---
+
+## How the AI Pipeline Works
+
+Every message goes through three steps inside `ChatWorker`, run in parallel where possible:
+
+### 1. RAG Retrieval (`RetrievalService`)
+
+The user's message is scored against **38 Blackstone knowledge chunks** stored in Postgres using TF-style keyword scoring with an exact-phrase bonus. The top 6 most relevant chunks are injected as grounding context into the LLM prompt.
+
+### 2. Sliding-Window Memory (`MemoryService`)
+
+Each user is identified by a UUID stored in their browser (`localStorage`). The backend maintains per-user conversation history in Postgres:
+
+- **Last 10 messages** are fetched verbatim and included in the prompt.
+- When stored messages exceed 20, the **oldest messages are summarised** into a rolling summary via a second LLM call, then deleted. The DB never grows unbounded.
+- The summary is injected above the recent messages, so the model always has full context without hitting token limits.
+
+### 3. LLM Call (`DeepSeekClient`)
+
+The final prompt structure sent to DeepSeek:
+
+```
+[System: Blackstone assistant persona]
+[System: RAG context — top 6 retrieved knowledge chunks]
+[System: Summary of earlier conversation]   ← if exists
+[Last 10 messages verbatim]
+[New user message]
+```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
 |---|---|
-| **Website Clone** | Hero, Navbar, Stats, What We Do, Earnings, Insights, Private Wealth, Newsletter, Footer — all matching Blackstone's design language |
-| **RAG Chat Widget** | Floating "Ask Blackstone" button → 560 px chat panel with streaming responses |
-| **Dual Retrieval Modes** | **Vector search** (pgvector cosine similarity) when an embed provider is configured; **keyword scoring** as a zero-config default |
-| **Streaming LLM** | DeepSeek `deepseek-chat` via OpenAI-compatible API, streamed token-by-token to the client |
-| **Knowledge Base** | ~40 hand-authored chunks covering AUM, funds (BREIT, BPP, BCP…), leadership, ESG, and more |
-| **Ingest API** | Protected `POST /api/ingest` endpoint for adding new chunks at runtime |
-| **Seed Script** | One-command database population with `npm run seed` |
+| Frontend | Next.js 16, TypeScript, Tailwind CSS |
+| Backend | ASP.NET Core 10 (.NET 10) |
+| Message Queue | RabbitMQ 3 |
+| Database | PostgreSQL 16 |
+| LLM | DeepSeek (`deepseek-chat`) |
+| Infrastructure | Docker + Docker Compose |
 
 ---
 
-## 🏗️ Architecture
-
-```
-User Browser
-    │
-    ▼
-Next.js 16 (App Router)
-    ├── /app/page.tsx          → Landing page (all sections)
-    ├── /app/api/chat          → Streaming RAG chat endpoint
-    └── /app/api/ingest        → Knowledge chunk ingest endpoint
-    │
-    ├── /components/
-    │   ├── ChatWidget.tsx     → Floating chat UI (streaming, suggested prompts)
-    │   ├── Hero.tsx           → Hero section
-    │   ├── Navbar.tsx         → Top navigation
-    │   ├── Stats.tsx          → AUM / key metrics bar
-    │   ├── WhatWeDo.tsx       → Strategy cards
-    │   ├── Earnings.tsx       → Earnings highlights
-    │   ├── Insights.tsx       → Insights/articles section
-    │   ├── PrivateWealth.tsx  → Private wealth section
-    │   ├── Newsletter.tsx     → Email subscription form
-    │   └── Footer.tsx         → Site footer
-    │
-    └── /lib/
-        ├── db.ts              → PostgreSQL pool (Neon-compatible)
-        ├── embeddings.ts      → OpenAI-compatible embed client
-        ├── knowledge.ts       → Static knowledge-base content (~40 chunks)
-        ├── llm.ts             → DeepSeek streaming chat client
-        └── retrieval.ts       → Vector & keyword retrieval logic
-```
-
-### RAG Flow
-
-```
-User Question
-     │
-     ▼
-POST /api/chat
-     │
-     ├── retrieve(query, topK=6)
-     │       ├─ [Vector mode]   embed(query) → pgvector cosine search
-     │       └─ [Keyword mode]  TF-style term scoring across all chunks
-     │
-     ├── buildContext(chunks) → numbered context block
-     │
-     └── streamChat(messages, context)
-             │
-             └── DeepSeek API (SSE) → streamed to browser
-```
-
----
-
-## 🚀 Getting Started
+## Running Locally
 
 ### Prerequisites
 
-- **Node.js** ≥ 20
-- **PostgreSQL** database (e.g. [Neon](https://neon.tech) free tier)
-- **DeepSeek API key** — [platform.deepseek.com](https://platform.deepseek.com)
-- *(Optional)* An OpenAI-compatible **embedding endpoint** for vector search
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download)
+- [Node.js 18+](https://nodejs.org/)
+- A [DeepSeek API key](https://platform.deepseek.com/)
 
-### 1. Clone & Install
+### 1. Start infrastructure
 
 ```bash
-git clone https://github.com/CommonCapital/RAG-system-integrated-in.git
-cd RAG-system-integrated-in
-npm install
+docker compose up -d
 ```
 
-### 2. Configure Environment
+Starts:
+- **PostgreSQL** on `localhost:5432` (user: `blackstone`, pass: `blackstone`, db: `blackstone`)
+- **RabbitMQ** on `localhost:5672` — management UI at http://localhost:15672 (`guest/guest`)
 
-Copy the example below into `.env.local` and fill in your values:
+### 2. Configure the backend
+
+Create `backend/BlackstoneAI/.env`:
 
 ```env
-# ── PostgreSQL (Neon recommended) ────────────────────────────────────────────
-DATABASE_URL=postgresql://user:password@host/dbname?sslmode=require
-
-# ── Chat LLM — DeepSeek ──────────────────────────────────────────────────────
-DEEPSEEK_API_KEY=sk-...
+DATABASE_URL=postgresql://blackstone:blackstone@localhost:5432/blackstone
+DEEPSEEK_API_KEY=sk-your-key-here
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 DEEPSEEK_CHAT_MODEL=deepseek-chat
-
-# ── Embeddings (optional — enables vector search) ────────────────────────────
-# Leave blank to use the built-in keyword retrieval (no extra cost / setup)
-EMBED_API_URL=https://api.openai.com/v1/embeddings
-EMBED_API_KEY=sk-...
-EMBED_API_MODEL=text-embedding-3-small
-
-# ── Ingest API protection ────────────────────────────────────────────────────
-INGEST_API_KEY=change-me-to-a-secret
+RABBITMQ_HOST=localhost
+RABBITMQ_PORT=5672
+RABBITMQ_USER=guest
+RABBITMQ_PASS=guest
 ```
 
-### 3. Seed the Database
-
-This creates the `knowledge_chunks` table and inserts all built-in content:
+### 3. Start the .NET backend
 
 ```bash
-npm run seed
+cd backend/BlackstoneAI
+dotnet run
 ```
 
-### 4. Run the Development Server
+On first run, the backend automatically:
+- Creates all Postgres tables (`knowledge_chunks`, `user_conversations`, `user_summaries`)
+- Seeds 38 Blackstone knowledge documents
+- Connects to RabbitMQ and starts the chat worker
+
+The API listens on **http://localhost:5187**.
+
+### 4. Configure the frontend
+
+Add to `.env.local` in the project root:
+
+```env
+NEXT_PUBLIC_DOTNET_URL=http://localhost:5187
+```
+
+### 5. Start the frontend
 
 ```bash
+npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) and click **"Ask Blackstone"** in the bottom-right corner.
+Open http://localhost:3000 and click **Ask Blackstone**.
 
 ---
 
-## 🔍 Retrieval Modes
+## Project Structure
 
-The system automatically selects the best available retrieval strategy:
-
-| Mode | Trigger | How it works |
-|---|---|---|
-| **Vector (pgvector)** | `EMBED_API_URL` + `EMBED_API_KEY` both set | Embeds the query, runs cosine similarity search in Postgres |
-| **Keyword (default)** | No embed provider configured | TF-style term scoring with exact-phrase bonus; no extra cost |
-
-To enable vector search, set the embedding env vars and run:
-
-```sql
--- In your Postgres database
-CREATE EXTENSION IF NOT EXISTS vector;
-ALTER TABLE knowledge_chunks ADD COLUMN IF NOT EXISTS embedding vector(1536);
+```
+├── app/                             # Next.js pages — UI only
+├── components/
+│   ├── ChatWidget.tsx               # Chat UI — calls .NET directly
+│   └── ...                          # Hero, Navbar, Footer, etc.
+├── backend/
+│   └── BlackstoneAI/
+│       ├── Controllers/
+│       │   ├── ChatController.cs    # POST /api/chat
+│       │   └── HistoryController.cs # GET  /api/history
+│       ├── Services/
+│       │   ├── ChatQueueService.cs  # RabbitMQ RPC (publish + await reply)
+│       │   ├── RetrievalService.cs  # Keyword search over knowledge_chunks
+│       │   ├── MemoryService.cs     # Sliding-window conversation memory
+│       │   ├── DeepSeekClient.cs    # LLM + summarisation calls
+│       │   └── KnowledgeSeeder.cs   # Auto-seeds 38 chunks on first run
+│       ├── Workers/
+│       │   └── ChatWorker.cs        # RabbitMQ consumer — AI pipeline
+│       ├── Models/
+│       │   └── ChatModels.cs        # Request/response records
+│       ├── Program.cs
+│       └── .env                     # Backend secrets (not committed)
+└── docker-compose.yml               # Postgres + RabbitMQ
 ```
 
-Then re-seed to populate the `embedding` column.
-
 ---
 
-## 📡 API Reference
+## API Reference
 
 ### `POST /api/chat`
 
-Streams a RAG-grounded response.
-
-**Request body:**
 ```json
+// Request
+{ "userId": "uuid", "message": "What is BREIT?" }
+
+// Response
+{ "content": "BREIT is Blackstone Real Estate Income Trust..." }
+```
+
+### `GET /api/history?userId=<uuid>`
+
+```json
+// Response
 {
   "messages": [
-    { "role": "user", "content": "What is BREIT?" }
+    { "role": "user", "content": "What is BREIT?" },
+    { "role": "assistant", "content": "BREIT is..." }
   ]
 }
 ```
 
-**Response:** `text/plain` stream (raw token chunks).
-
 ---
 
-### `POST /api/ingest`
+## Disclaimer
 
-Adds a new knowledge chunk to the database.
-
-**Headers:** `x-api-key: <INGEST_API_KEY>`
-
-**Request body:**
-```json
-{
-  "source": "blackstone.com/breit",
-  "category": "real-estate",
-  "content": "BREIT is Blackstone's non-traded REIT..."
-}
-```
-
----
-
-## 🛠️ Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Framework | [Next.js 16](https://nextjs.org) (App Router, Server Components) |
-| Language | TypeScript 5 |
-| Styling | Tailwind CSS v4 |
-| Icons | [Lucide React](https://lucide.dev) |
-| Database | PostgreSQL via [`pg`](https://node-postgres.com) (Neon-compatible) |
-| Vector Search | [pgvector](https://github.com/pgvector/pgvector) *(optional)* |
-| LLM | [DeepSeek](https://deepseek.com) (`deepseek-chat`) |
-| Embeddings | Any OpenAI-compatible endpoint *(optional)* |
-
----
-
-## 📁 Project Structure
-
-```
-├── app/
-│   ├── api/
-│   │   ├── chat/route.ts       # Streaming RAG endpoint
-│   │   └── ingest/route.ts     # Knowledge ingestion endpoint
-│   ├── globals.css
-│   ├── layout.tsx
-│   └── page.tsx                # Main landing page
-├── components/                 # All UI sections + ChatWidget
-├── lib/
-│   ├── db.ts                   # DB pool & schema init
-│   ├── embeddings.ts           # Embed API client
-│   ├── knowledge.ts            # Built-in knowledge base (~40 chunks)
-│   ├── llm.ts                  # DeepSeek streaming client
-│   └── retrieval.ts            # Retrieval logic (vector + keyword)
-├── scripts/
-│   └── seed.ts                 # Database seeding script
-└── .env.local                  # Environment variables (not committed)
-```
-
----
-
-## ⚠️ Disclaimer
-
-This project is built for **educational and demonstration purposes only**. It is not affiliated with, endorsed by, or connected to Blackstone Inc. in any way. Nothing on this site constitutes investment advice.
-
----
-
-## 📄 License
-
-MIT
+Built for educational and demonstration purposes only. Not affiliated with or endorsed by Blackstone Inc. Nothing on this site constitutes investment advice.
