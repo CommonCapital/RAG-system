@@ -26,13 +26,14 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({ userId: userId ?? "anonymous", message: message.trim() }),
     });
 
-    const data = await res.json();
+    const text = await res.text();
+    let data: { content?: string; error?: string } = {};
+    try { if (text) data = JSON.parse(text); } catch { /* non-JSON body */ }
 
     if (!res.ok) {
       return NextResponse.json({ error: data.error ?? "AI unavailable" }, { status: res.status });
     }
 
-    // Return as plain text to stay compatible with the streaming reader in ChatWidget
     return new NextResponse(data.content ?? "", {
       headers: { "Content-Type": "text/plain; charset=utf-8" },
     });
