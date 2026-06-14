@@ -6,7 +6,7 @@ namespace BlackstoneAI.Services;
 public class QdrantService(IConfiguration config)
 {
     private const string Collection = "blackstone-knowledge";
-    private const uint VectorSize = 512; // CLIP ViT-B/16 text encoder output
+    private const uint VectorSize = 768; // nomic-embed-text output dimension
 
     private QdrantClient CreateClient()
     {
