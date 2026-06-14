@@ -6,9 +6,53 @@ public record MemoryContext(string? Summary, List<(string Role, string Content)>
 
 public class MemoryService(IConfiguration config, DeepSeekClient ai)
 {
-    private readonly string _connStr = config["DATABASE_URL"]!;
+    private readonly string _connStr = BuildConnStr(config["DATABASE_URL"]!);
+
+    public static string ParseConnStr(string url) => BuildConnStr(url);
+
+    private static string BuildConnStr(string url)
+    {
+        // Parse URI manually and emit key=value format Npgsql always accepts
+        var uri = new Uri(url.Replace("postgresql://", "https://"));
+        var userInfo = uri.UserInfo.Split(':', 2);
+        var host = uri.Host;
+        var port = uri.Port > 0 ? uri.Port : 5432;
+        var db = uri.AbsolutePath.TrimStart('/');
+        var user = Uri.UnescapeDataString(userInfo[0]);
+        var pass = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
+        return $"Host={host};Port={port};Database={db};Username={user};Password={pass}";
+    }
     private const int RecentWindow = 10;
     private const int SummarizeAfter = 20;
+
+    public async Task InitSchemaAsync()
+    {
+        await using var conn = new NpgsqlConnection(_connStr);
+        await conn.OpenAsync();
+        await using var cmd = new NpgsqlCommand(@"
+            CREATE TABLE IF NOT EXISTS user_conversations (
+                id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id    TEXT NOT NULL,
+                role       TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                content    TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS user_conversations_user_id_idx
+                ON user_conversations (user_id, created_at);
+            CREATE TABLE IF NOT EXISTS user_summaries (
+                user_id    TEXT PRIMARY KEY,
+                summary    TEXT NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT now()
+            );
+            CREATE TABLE IF NOT EXISTS knowledge_chunks (
+                id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                source     TEXT NOT NULL,
+                category   TEXT NOT NULL,
+                content    TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT now()
+            );", conn);
+        await cmd.ExecuteNonQueryAsync();
+    }
 
     public async Task<MemoryContext> GetContextAsync(string userId)
     {

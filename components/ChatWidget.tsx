@@ -3,6 +3,8 @@
 import { useState, useRef, useEffect, FormEvent } from "react";
 import { Send, Loader2, X, ArrowUpRight } from "lucide-react";
 
+const API = process.env.NEXT_PUBLIC_DOTNET_URL ?? "http://localhost:5187";
+
 function getUserId(): string {
   let id = localStorage.getItem("bx_user_id");
   if (!id) {
@@ -48,7 +50,7 @@ export default function ChatWidget() {
     if (historyLoaded) return;
     const uid = getUserId();
     userIdRef.current = uid;
-    fetch(`/api/history?userId=${uid}`)
+    fetch(`${API}/api/history?userId=${uid}`)
       .then((r) => r.json())
       .then((data) => {
         if (Array.isArray(data.messages) && data.messages.length > 0) {
@@ -69,28 +71,18 @@ export default function ChatWidget() {
 
     try {
       const uid = userIdRef.current ?? getUserId();
-      const res = await fetch("/api/chat", {
+      const res = await fetch(`${API}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId: uid, message: text.trim() }),
       });
-      if (!res.ok) {
-        const json = await res.json().catch(() => ({}));
-        throw new Error(json.error ?? "Request failed");
-      }
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      let full = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        full += decoder.decode(value, { stream: true });
-        setMessages((prev) => {
-          const copy = [...prev];
-          copy[copy.length - 1] = { role: "assistant", content: full };
-          return copy;
-        });
-      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error ?? "Request failed");
+      setMessages((prev) => {
+        const copy = [...prev];
+        copy[copy.length - 1] = { role: "assistant", content: data.content ?? "" };
+        return copy;
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
       setMessages((prev) => prev.slice(0, -2)); // remove both user + empty assistant

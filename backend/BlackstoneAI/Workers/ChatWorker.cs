@@ -8,7 +8,7 @@ using RabbitMQ.Client.Events;
 namespace BlackstoneAI.Workers;
 
 // Consumes chat.requests, processes AI + memory, publishes to chat.replies
-public class ChatWorker(IConfiguration config, DeepSeekClient ai, MemoryService memory, ILogger<ChatWorker> logger)
+public class ChatWorker(IConfiguration config, DeepSeekClient ai, MemoryService memory, RetrievalService retrieval, ILogger<ChatWorker> logger)
     : BackgroundService
 {
     private IConnection? _conn;
@@ -63,11 +63,13 @@ public class ChatWorker(IConfiguration config, DeepSeekClient ai, MemoryService 
                 req = JsonSerializer.Deserialize<ChatRequest>(Encoding.UTF8.GetString(ea.Body.ToArray()));
                 if (req is null) throw new InvalidOperationException("Null request");
 
-                var memCtx = await memory.GetContextAsync(req.UserId);
+                var memTask = memory.GetContextAsync(req.UserId);
+                var ragTask = retrieval.RetrieveContextAsync(req.Message);
+                await Task.WhenAll(memTask, ragTask);
+                var memCtx = memTask.Result;
+                var ragContext = ragTask.Result;
 
-                // RAG retrieval is handled in Next.js; here we pass empty context
-                // (or you can port retrieval to .NET later)
-                var answer = await ai.ChatAsync(memCtx.RecentMessages, req.Message, "", memCtx.Summary);
+                var answer = await ai.ChatAsync(memCtx.RecentMessages, req.Message, ragContext, memCtx.Summary);
 
                 _ = Task.Run(() => memory.SaveAndCompressAsync(req.UserId, req.Message, answer ?? ""));
 

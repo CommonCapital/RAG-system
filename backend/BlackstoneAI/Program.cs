@@ -19,6 +19,8 @@ builder.Services.AddControllers();
 builder.Services.AddHttpClient<DeepSeekClient>();
 builder.Services.AddSingleton<DeepSeekClient>();
 builder.Services.AddSingleton<MemoryService>();
+builder.Services.AddSingleton<RetrievalService>();
+builder.Services.AddSingleton<KnowledgeSeeder>();
 builder.Services.AddSingleton<ChatQueueService>(sp =>
     ChatQueueService.CreateAsync(sp.GetRequiredService<IConfiguration>()).GetAwaiter().GetResult());
 
@@ -32,4 +34,11 @@ builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
 var app = builder.Build();
 app.UseCors();
 app.MapControllers();
+
+// Init schema + seed knowledge on startup
+var memory = app.Services.GetRequiredService<MemoryService>();
+var seeder = app.Services.GetRequiredService<KnowledgeSeeder>();
+await memory.InitSchemaAsync();
+await seeder.SeedIfEmptyAsync();
+
 app.Run();
